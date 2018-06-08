@@ -1,24 +1,22 @@
 ---
 -- Version comparison library for Lua.
 -- 
--- Comparison is simple and straightforward, no interpretation is done whatsoever 
--- regarding compatibility etc. If that's what you're looking for, then please 
--- checkout the semantic versioning specification (SemVer).
+-- Comparison is simple and straightforward, with basic support for SemVer.
 --
 -- @usage
--- local ver = require("version")
+-- local version = require("version")
 --
 -- -- create a version and perform some comparisons
--- local v = ver.version("3.1.0")
--- assert( v == ver.version("3.1"))   -- missing elements default to zero, and hence are equal
--- assert( v > ver.version("3.0"))
+-- local v = version("3.1.0")
+-- assert( v == version("3.1"))   -- missing elements default to zero, and hence are equal
+-- assert( v > version("3.0"))
 --
 -- -- create a version range, and check whether a version is within that range
--- local r = ver.range("2.75", "3.50.3")
+-- local r = version.range("2.75", "3.50.3")
 -- assert(r:matches(v))
 --
 -- -- create a set of multiple ranges, adding elements in a chained fashion
--- local compatible = ver.set("1.1","1.2"):allowed("2.1", "2.5"):disallowed("2.3")
+-- local compatible = version.set("1.1","1.2"):allowed("2.1", "2.5"):disallowed("2.3")
 --
 -- assert(compatible:matches("1.1.3"))
 -- assert(compatible:matches("1.1.3"))
@@ -29,16 +27,14 @@
 -- -- print a formatted set
 -- print(compatible) --> "1.1 to 1.2 and 2.1 to 2.5, but not 2.3"
 --
--- -- create an upwards comptibility check, allowing all version 1.x
--- local c = ver.set("1.0","2.0"):disallowed("2.0")
+-- -- create an upwards compatibility check, allowing all versions 1.x
+-- local c = version.set("1.0","2.0"):disallowed("2.0")
 -- assert(c:matches("1.4"))
 -- assert(not c:matches("2.0"))
 -- 
 -- @copyright Mashape Inc.
 -- @author Thijs Schreijer
 -- @license Apache 2.0
-
-local _M = {}
 
 -- Utility split function
 local function split(str, pat)
@@ -64,12 +60,51 @@ local function split(str, pat)
   return t
 end
 
+-- foreward declaration of constructor
+local _new, _range, _set
 
---- Version.
--- object representing a single version
--- @section version
-
-local mt_version = {
+-- Metatables for version, range and set
+local mt_version
+mt_version = {
+    __index = {
+      --- Matches a provider-version on a consumer-version based on the
+      -- semantic versioning specification.
+      -- The implementation does not support pre-release and/or build metadata,
+      -- only the major, minor, and patch levels are compared.
+      -- @function range:semver
+      -- @param v Version (string or `version` object) as served by the provider
+      -- @return `true` or `false` whether the version matches, or `nil+err`
+      -- @usage local consumer = "1.2"     -- consumer requested version
+      -- local provider = "1.5.2"   -- provider served version
+      -- 
+      -- local compatible = version(consumer):semver(provider)
+      semver = function(self, v)
+        -- this function will be called once (in the meta table), it will set
+        -- the actual function on the version table itself
+        if self[1] == 0 then
+          -- major 0 is only compatible when equal
+          self.semver = function(self, v2)
+            if getmetatable(v2) ~= mt_version then 
+              local parsed, err = _new(v2, self.strict)
+              if not parsed then return nil, err end
+              v2 = parsed
+            end
+            return self == v2
+          end
+        elseif self[4] then
+          -- more than 3 elements, cannot compare
+          self.semver = function(self)
+            return nil, "Version has too many elements (semver max 3)"
+          end
+        else
+          local semver_set = _set(self, self[1] + 1, self.strict):disallowed(self[1] + 1)
+          self.semver = function(self, v2)
+            return semver_set:matches(v2)
+          end
+        end
+        return self:semver(v)
+      end
+    },
     __eq = function(a,b)
       local l = math.max(#a, #b)
       for i = 1, l do
@@ -96,49 +131,17 @@ local mt_version = {
     end,
 }
 
---- Boolean flag (module wide) indicating parsing rules for version strings.
--- 
--- @field strict If `truthy` then the string to parse may only be numbers and dots. If `falsy` (default value) the parser will grab the first 'number and dots' sequence from the string.
--- @usage local ver = require("version")
--- 
--- ver.strict = false              --> default value
--- print(ver.version("Lua 5.3"))   --> 5.3
---
--- ver.strict = true
--- print(ver.version("Lua 5.3"))   --> error!
-_M.strict = false
-
---- Creates a new version object from a string. The returned table will have
--- comparison operators, eg. LT, EQ, GT. For all comparisons, any missing numbers
--- will be assumed to be "0" on the least significant side of the version string.
--- @param v String formatted as numbers separated by dots (no limit on number of elements).
--- @return version object
-_M.version = function(v)
-  if not _M.strict then
-    v = v:match("([%d%.]+)")
-  end
-  local t = split(v, "%.")
-  for i, s in ipairs(t) do
-    local n = tonumber(s)
-    assert(n, "Not a valid version element; "..tostring(s))
-    t[i] = n
-  end
-  return setmetatable(t, mt_version)
-end
-
---- Range.
--- object representing a range of versions
--- @section range
-
 local mt_range = {
   __index = {
       --- Matches a version on a range.
-      -- @name range:matches
+      -- @function range:matches
       -- @param v Version (string or `version` object) to match
-      -- @return `true` when the version matches the range, `false` otherwise
+      -- @return `true` or `false` whether the version matches the range, or `nil+err`
       matches = function(self, v)
         if getmetatable(v) ~= mt_version then 
-          v = _M.version(v)
+          local parsed, err = _new(v, self.strict)
+          if not parsed then return nil, err end
+          v = parsed
         end
         
         return (v >= self.from) and (v <= self.to)
@@ -154,66 +157,54 @@ local mt_range = {
     end,
 }
 
---- Creates a version range. 
--- @param v1 The FROM version of the range (string or `version` object). If `nil`, assumed to be 0.
--- @param v2 (optional) The TO version of the range (string or `version` object). If omitted it will default to `v1`.
--- @return range object with `from` and `to` fields and `set:matches` method.
-_M.range = function(v1,v2)
-  assert (v1 or v2, "At least one parameter is required")
-  v1 = v1 or "0"
-  v2 = v2 or v1
-  if getmetatable(v1) ~= mt_version then v1 = _M.version(v1) end
-  if getmetatable(v2) ~= mt_version then v2 = _M.version(v2) end
-  assert(v1 <= v2, "FROM version must be less than or equal to the TO version, to be a proper range")
-  
-  return setmetatable({
-    from = v1,
-    to = v2,
-  }, mt_range)
-end
-
---- Set.
--- object representing a set of version ranges
--- @section set
-
-local insertr = function(t, v1, v2)
-  if getmetatable(v1) == mt_range then
-    assert (v2 == nil, "First parameter was a range, second must be nil.")
-    table.insert(t, v1)
-  else
-    table.insert(t, _M.range(v1, v2))
-  end
-end
-
 local mt_set = {
   __index = {
       --- Adds an ALLOWED range to the set.
-      -- @name set:allowed
+      -- @function set:allowed
       -- @param v1 Version or range, if version, the FROM version in either string or `version` object format
       -- @param v2 Version (optional), TO version in either string or `version` object format
-      -- @return The `set` object, to easy chain multiple allowed/disallowed ranges
+      -- @return The `set` object, to easy chain multiple allowed/disallowed ranges, or `nil+err`
       allowed = function(self, v1, v2)
-        insertr(self.ok, v1, v2)
+        if getmetatable(v1) == mt_range then
+          assert (v2 == nil, "First parameter was a range, second must be nil.")
+          table.insert(self.ok, v1)
+        else
+          local r, err = _range(v1, v2, self.strict)
+          if not r then return nil, err end
+          table.insert(self.ok, r)
+        end
         return self
       end,
       --- Adds a DISALLOWED range to the set.
-      -- @name set:disallowed
+      -- @function set:disallowed
       -- @param v1 Version or range, if version, the FROM version in either string or `version` object format
       -- @param v2 Version (optional), TO version in either string or `version` object format
-      -- @return The `set` object, to easy chain multiple allowed/disallowed ranges
+      -- @return The `set` object, to easy chain multiple allowed/disallowed ranges, or `nil+err`
       disallowed = function(self,v1, v2)
-        insertr(self.nok, v1, v2)
+        if getmetatable(v1) == mt_range then
+          assert (v2 == nil, "First parameter was a range, second must be nil.")
+          table.insert(self.nok, v1)
+        else
+          local r, err = _range(v1, v2, self.strict)
+          if not r then return nil, err end
+          table.insert(self.nok, r)
+        end
         return self
       end,
       
       --- Matches a version against the set of allowed and disallowed versions.
-      -- NOTE: disallowed has a higher precedence, so a version that matches the allowed-set,
-      -- but also the dis-allowed set, will return `false`.
-      -- @name set:matches
+      --
+      -- NOTE: `disallowed` has a higher precedence, so a version that matches the `allowed` set,
+      -- but also the `disallowed` set, will return `false`.
+      -- @function set:matches
       -- @param v1 Version to match (either string or `version` object).
-      -- @return `true` if the version matches the set, or `false` otherwise
+      -- @return `true` or `false` whether the version matches the set, or `nil+err`
       matches = function(self, v)
-        if getmetatable(v) ~= mt_version then v = _M.version(v) end
+        if getmetatable(v) ~= mt_version then
+          local parsed, err = _new(v, self.strict)
+          if not parsed then return nil, err end
+          v = parsed
+        end
         
         local success
         for _, range in pairs(self.ok) do
@@ -261,14 +252,121 @@ local mt_set = {
     end,
 }
 
---- Creates a version set. A set contains a number of allowed and disallowed version ranges.
--- @param ... initial version/range to allow, see `set:allowed` for parameter descriptions
--- @return a `set` object, with `ok` and `nok` lists and a `set:matches` method 
-_M.set = function(...)
+
+_new = function(v, strict)
+  v = tostring(v)
+  if strict then
+    -- edge case: do not allow trailing dot
+    if v:sub(-1,-1) == "." then
+      return nil, "Not a valid version element: '"..tostring(v).."'"
+    end 
+  else
+    m = v:match("(%d[%d%.]*)")
+    if not m then
+      return nil, "Not a valid version element: '"..tostring(v).."'"
+    end
+    v = m
+  end
+  local t = split(v, "%.")
+  for i, s in ipairs(t) do
+    local n = tonumber(s)
+    if not n then
+      return nil, "Not a valid version element: '"..tostring(v).."'"
+    end
+    t[i] = n
+  end
+  t.strict = strict
+  return setmetatable(t, mt_version)
+end
+
+_range = function(v1,v2, strict)
+  local err
+  assert (v1 or v2, "At least one parameter is required")
+  v1 = v1 or "0"
+  v2 = v2 or v1
+  if getmetatable(v1) ~= mt_version then
+    v1, err = _new(v1, strict)
+    if not v1 then return nil, err end
+  end
+  if getmetatable(v2) ~= mt_version then
+    v2, err = _new(v2, strict)
+    if not v2 then return nil, err end
+  end
+  if v1 > v2 then
+    return nil, "FROM version must be less than or equal to the TO version"
+  end
+  
+  return setmetatable({
+    from = v1,
+    to = v2,
+    strict = strict,
+  }, mt_range)
+end
+
+_set = function(v1, v2, strict)
   return setmetatable({
     ok = {},
     nok = {},
-  }, mt_set):allowed(...)
+    strict = strict,
+  }, mt_set):allowed(v1, v2)
 end
+
+local make_module = function(strict)
+  return setmetatable({
+    --- Creates a new version object from a string.
+    -- The returned table will have
+    -- comparison operators, eg. LT, EQ, GT. For all comparisons, any missing numbers
+    -- will be assumed to be "0" on the least significant side of the version string.
+    --
+    -- Calling on the module table is a shortcut to `new`.
+    -- @param v String formatted as numbers separated by dots (no limit on number of elements).
+    -- @return `version` object, or `nil+err`
+    -- @usage local v = version.new("0.1")
+    -- -- is identical to
+    -- local v = version("0.1")
+    --
+    -- print(v)     --> "0.1"
+    -- print(v[1])  --> 0
+    -- print(v[2])  --> 1
+    new = function(v) return _new(v, strict) end,
+
+    --- Creates a version range.  A `range` object represents a range of versions.
+    -- @param v1 The FROM version of the range (string or `version` object). If `nil`, assumed to be 0.
+    -- @param v2 (optional) The TO version of the range (string or `version` object). If omitted it will default to `v1`.
+    -- @return range object with `from` and `to` fields and `set:matches` method, or `nil+err`.
+    -- @usage local r = version.range("0.1"," 2.4")
+    --
+    -- print(v.from)     --> "0.1"
+    -- print(v.to[1])    --> 2
+    -- print(v.to[2])    --> 4
+    range = function(v1,v2) return _range(v1, v2, strict) end,
+
+    --- Creates a version set.
+    -- A `set` is an object that contains a number of allowed and disallowed version `range` objects.
+    -- @param v1 initial version/range to allow, see `set:allowed` for parameter descriptions
+    -- @param v2 initial version/range to allow, see `set:allowed` for parameter descriptions
+    -- @return a `set` object, with `ok` and `nok` lists and a `set:matches` method, or `nil+err`
+    set = function(v1, v2) return _set(v1, v2, strict) end,
+  }, {
+    __call = function(self, ...)
+      return self.new(...)
+    end
+  })
+end
+
+--- Similar module, but with stricter parsing rules. 
+-- `version.strict` is identical to the `version` module itself, but it requires
+-- exact version strings, where as the regular parser will simply grab the
+-- first sequence of numbers and dots from the string.
+-- @field strict
+-- print(version("5.2"))                    -- "5.2"
+-- print(version("Lua 5.2 for me"))         -- "5.2"
+-- print(version("5..2"))                   -- nil, "Not a valid version element: '5..1'"
+--
+-- print(version.strict("5.2"))             -- "5.2"
+-- print(version.strict("Lua 5.2 for me"))  -- nil, "Not a valid version element: '5..1'"
+-- print(version.strict("5..2"))            -- nil, "Not a valid version element: '5..1'"
+local _M = make_module(false)
+_M.strict = make_module(true)
 
 return _M

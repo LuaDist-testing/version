@@ -1,17 +1,17 @@
 -- This file was automatically generated for the LuaDist project.
 
 package = "version"
-version = "0.3-1"
+version = "1.0-1"
 
 -- LuaDist source
 source = {
-  tag = "0.3-1",
+  tag = "1.0-1",
   url = "git://github.com/LuaDist-testing/version.git"
 }
 -- Original source
 -- source = {
---   url = "https://github.com/Mashape/version.lua/archive/v0_3.tar.gz",
---   dir = "version.lua-0_3"
+--   url = "https://github.com/Mashape/version.lua/archive/v1_0.tar.gz",
+--   dir = "version.lua-1_0"
 -- }
 
 description = {
@@ -21,7 +21,7 @@ description = {
       as individual versions, against ranges, or in sets with multiple
       allowed and disallowed ranges/versions.
    ]],
-   license = "MIT/X11",
+   license = "Apache 2.0",
    homepage = "https://github.com/Mashape/version.lua"
 }
 dependencies = {
